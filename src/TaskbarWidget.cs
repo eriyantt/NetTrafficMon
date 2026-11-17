@@ -1,0 +1,566 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Drawing.Text;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace NetTrafficMon
+{
+    public class TaskbarWidget : Form
+    {
+        private readonly TrafficEngine _engine;
+        private readonly AppSettings _settings;
+        private readonly ToolTip _toolTip;
+        private ContextMenuStrip _contextMenu;
+        private Action _onDoubleClickAction;
+
+        private Font _fontArrow;
+        private Font _fontSpeed;
+
+        public TaskbarWidget(TrafficEngine engine, AppSettings settings)
+        {
+            _engine = engine;
+            _settings = settings;
+
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+
+            _toolTip = new ToolTip
+            {
+                InitialDelay = 400,
+                ReshowDelay = 200,
+                AutoPopDelay = 8000,
+                ShowAlways = true
+            };
+
+            InitializeFonts();
+            ApplySizeAndPosition();
+
+            MouseDown += OnWidgetMouseDown;
+            MouseUp += OnWidgetMouseUp;
+            DoubleClick += OnWidgetDoubleClick;
+            LocationChanged += OnWidgetLocationChanged;
+
+            _engine.TrafficUpdated += OnTrafficUpdated;
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= NativeMethods.WS_EX_LAYERED;
+                cp.ExStyle |= NativeMethods.WS_EX_TOOLWINDOW;
+                cp.ExStyle |= NativeMethods.WS_EX_NOACTIVATE;
+                return cp;
+            }
+        }
+
+        private void InitializeFonts()
+        {
+            try
+            {
+                _fontArrow = new Font("Segoe UI", 8.0f, FontStyle.Bold);
+                _fontSpeed = new Font("Segoe UI", 8.5f, FontStyle.Bold);
+            }
+            catch
+            {
+                _fontArrow = new Font(FontFamily.GenericSansSerif, 8.0f, FontStyle.Bold);
+                _fontSpeed = new Font(FontFamily.GenericSansSerif, 8.5f, FontStyle.Bold);
+            }
+        }
+
+        public void SetContextMenu(ContextMenuStrip menu)
+        {
+            _contextMenu = menu;
+            ContextMenuStrip = menu;
+        }
+
+        public void SetDoubleClickHandler(Action action)
+        {
+            _onDoubleClickAction = action;
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            RenderLayeredWindow();
+        }
+
+        public void ApplyThemeAndLayout()
+        {
+            ApplySizeAndPosition();
+            RenderLayeredWindow();
+        }
+
+        public void ApplySizeAndPosition()
+        {
+            int w = 115;
+            int h = 38;
+
+            switch (_settings.Mode)
+            {
+                case DisplayMode.SingleLine:
+                    w = 210;
+                    h = 30;
+                    break;
+                case DisplayMode.WithMiniGraph:
+                    w = 175;
+                    h = 38;
+                    break;
+                case DisplayMode.CompactTwoLine:
+                default:
+                    w = 115;
+                    h = 38;
+                    break;
+            }
+
+            Size = new Size(w, h);
+
+            if (_settings.DockToTaskbar || _settings.WidgetX < 0 || _settings.WidgetY < 0)
+            {
+                DockToTaskbarPosition();
+            }
+            else
+            {
+                Location = new Point(_settings.WidgetX, _settings.WidgetY);
+            }
+        }
+
+        public void DockToTaskbarPosition()
+        {
+            Rectangle tbRect = GetTaskbarRectangle();
+
+            int x, y;
+            if (tbRect.Width > tbRect.Height)
+            {
+                // Horizontal taskbar (Bottom or Top)
+                y = tbRect.Top + (tbRect.Height - Height) / 2;
+                x = tbRect.Right - Width - 240;
+                if (x < tbRect.Left + 20) x = tbRect.Left + 20;
+            }
+            else
+            {
+                // Vertical taskbar (Left or Right)
+                x = tbRect.Left + (tbRect.Width - Width) / 2;
+                y = tbRect.Bottom - Height - 200;
+                if (y < tbRect.Top + 20) y = tbRect.Top + 20;
+            }
+
+            Location = new Point(x, y);
+            _settings.WidgetX = x;
+            _settings.WidgetY = y;
+            _settings.DockToTaskbar = true;
+            _settings.Save();
+
+            RenderLayeredWindow();
+        }
+
+        public static Rectangle GetTaskbarRectangle()
+        {
+            var screen = Screen.PrimaryScreen;
+            var b = screen.Bounds;
+            var w = screen.WorkingArea;
+
+            if (w.Top > b.Top)
+                return new Rectangle(b.Left, b.Top, b.Width, w.Top - b.Top);
+            if (w.Bottom < b.Bottom)
+                return new Rectangle(b.Left, w.Bottom, b.Width, b.Bottom - w.Bottom);
+            if (w.Left > b.Left)
+                return new Rectangle(b.Left, b.Top, w.Left - b.Left, b.Height);
+            if (w.Right < b.Right)
+                return new Rectangle(w.Right, b.Top, b.Right - w.Right, b.Height);
+
+            return new Rectangle(b.Left, b.Bottom - 48, b.Width, 48);
+        }
+
+        private void OnTrafficUpdated(TrafficSample sample)
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+
+            string upText = FormatHelper.FormatSpeed(_engine.CurrentUploadSpeed, _settings.Unit, _settings.DecimalPlaces);
+            string downText = FormatHelper.FormatSpeed(_engine.CurrentDownloadSpeed, _settings.Unit, _settings.DecimalPlaces);
+            string upTotal = FormatHelper.FormatBytes(_engine.SessionBytesSent);
+            string downTotal = FormatHelper.FormatBytes(_engine.SessionBytesReceived);
+
+            string tip = string.Format(
+                "NetTrafficMon\n" +
+                "Adapter: {0}\n" +
+                "IP: {1}\n" +
+                "--------------------\n" +
+                "▲ Upload:   {2} (Total: {3})\n" +
+                "▼ Download: {4} (Total: {5})\n" +
+                "--------------------\n" +
+                "Double-click: Details & Graph\n" +
+                "Right-click: Settings",
+                _engine.ActiveAdapterName,
+                _engine.ActiveAdapterIPv4,
+                upText, upTotal,
+                downText, downTotal);
+
+            _toolTip.SetToolTip(this, tip);
+
+            NativeMethods.SetWindowPos(Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+
+            RenderLayeredWindow();
+        }
+
+        private void OnWidgetLocationChanged(object sender, EventArgs e)
+        {
+            if (IsHandleCreated)
+            {
+                RenderLayeredWindow();
+            }
+        }
+
+        private void OnWidgetMouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && !_settings.LockPosition)
+            {
+                NativeMethods.ReleaseCapture();
+                NativeMethods.SendMessage(Handle, NativeMethods.WM_NCLBUTTONDOWN, NativeMethods.HTCAPTION, 0);
+
+                _settings.WidgetX = Location.X;
+                _settings.WidgetY = Location.Y;
+
+                Rectangle tb = GetTaskbarRectangle();
+                _settings.DockToTaskbar = Bounds.IntersectsWith(tb);
+                _settings.Save();
+
+                RenderLayeredWindow();
+            }
+        }
+
+        private void OnWidgetMouseUp(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right && _contextMenu != null)
+            {
+                _contextMenu.Show(Cursor.Position);
+            }
+        }
+
+        private void OnWidgetDoubleClick(object sender, EventArgs e)
+        {
+            if (_onDoubleClickAction != null)
+            {
+                _onDoubleClickAction();
+            }
+        }
+
+        public void RenderLayeredWindow()
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+            if (Width <= 0 || Height <= 0) return;
+
+            IntPtr screenDc = NativeMethods.GetDC(IntPtr.Zero);
+            IntPtr memDc = NativeMethods.CreateCompatibleDC(screenDc);
+
+            NativeMethods.BITMAPINFO bi = new NativeMethods.BITMAPINFO();
+            bi.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(NativeMethods.BITMAPINFOHEADER));
+            bi.bmiHeader.biWidth = Width;
+            bi.bmiHeader.biHeight = -Height; // Top-down
+            bi.bmiHeader.biPlanes = 1;
+            bi.bmiHeader.biBitCount = 32;
+            bi.bmiHeader.biCompression = 0;
+
+            IntPtr pBits;
+            IntPtr hDib = NativeMethods.CreateDIBSection(memDc, ref bi, 0, out pBits, IntPtr.Zero, 0);
+            IntPtr oldDib = NativeMethods.SelectObject(memDc, hDib);
+
+            try
+            {
+                using (Bitmap bmp = new Bitmap(Width, Height, Width * 4, PixelFormat.Format32bppPArgb, pBits))
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                    g.Clear(Color.Transparent);
+
+                    // Always fill the whole rectangle with alpha=1 so mouse events/dragging work everywhere,
+                    // while remaining 100% visually invisible!
+                    using (Brush hitTestBrush = new SolidBrush(Color.FromArgb(1, 0, 0, 0)))
+                    {
+                        g.FillRectangle(hitTestBrush, 0, 0, Width, Height);
+                    }
+
+                    int alphaByte = (int)(Math.Max(0.2, Math.Min(1.0, _settings.Opacity)) * 255);
+                    Color upColor = FormatHelper.ColorFromHex(_settings.UploadColor, Color.FromArgb(255, 112, 67));
+                    Color downColor = FormatHelper.ColorFromHex(_settings.DownloadColor, Color.FromArgb(0, 230, 118));
+                    Color textColor = FormatHelper.ColorFromHex(_settings.TextColor, Color.White);
+
+                    // Theme background rendering
+                    if (_settings.Theme == AppTheme.Transparent)
+                    {
+                        // 100% Transparent theme: no solid fill or border box!
+                        // The Windows taskbar shows right through.
+                    }
+                    else if (_settings.Theme == AppTheme.Light)
+                    {
+                        // Light theme: crisp light pill with clean subtle border
+                        Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+                        using (GraphicsPath path = CreateRoundedRectangle(rect, 5))
+                        {
+                            using (Brush bgBrush = new SolidBrush(Color.FromArgb(alphaByte, 240, 242, 245)))
+                            {
+                                g.FillPath(bgBrush, path);
+                            }
+                            using (Pen borderPen = new Pen(Color.FromArgb(alphaByte, 205, 210, 215), 1.0f))
+                            {
+                                g.DrawPath(borderPen, path);
+                            }
+                        }
+                        textColor = Color.FromArgb(25, 25, 28);
+                    }
+                    else
+                    {
+                        // Dark theme: sleek dark pill, ZERO white lines or white corners!
+                        Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+                        Color userBg = FormatHelper.ColorFromHex(_settings.BackgroundColor, Color.FromArgb(26, 26, 30));
+                        using (GraphicsPath path = CreateRoundedRectangle(rect, 5))
+                        {
+                            using (Brush bgBrush = new SolidBrush(Color.FromArgb(alphaByte, userBg.R, userBg.G, userBg.B)))
+                            {
+                                g.FillPath(bgBrush, path);
+                            }
+                            // Clean subtle dark border (not white!)
+                            using (Pen borderPen = new Pen(Color.FromArgb(Math.Min(255, alphaByte + 20), 45, 45, 52), 1.0f))
+                            {
+                                g.DrawPath(borderPen, path);
+                            }
+                        }
+                    }
+
+                    string upStr = FormatHelper.FormatSpeed(_engine.CurrentUploadSpeed, _settings.Unit, _settings.DecimalPlaces);
+                    string downStr = FormatHelper.FormatSpeed(_engine.CurrentDownloadSpeed, _settings.Unit, _settings.DecimalPlaces);
+                    bool isTransparent = (_settings.Theme == AppTheme.Transparent);
+
+                    if (_settings.Mode == DisplayMode.SingleLine)
+                    {
+                        DrawSingleLine(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
+                    }
+                    else if (_settings.Mode == DisplayMode.WithMiniGraph)
+                    {
+                        DrawWithMiniGraph(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
+                    }
+                    else
+                    {
+                        DrawCompactTwoLine(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
+                    }
+                }
+
+                NativeMethods.SIZE size = new NativeMethods.SIZE { cx = Width, cy = Height };
+                NativeMethods.POINT pointSource = new NativeMethods.POINT { X = 0, Y = 0 };
+                NativeMethods.POINT topPos = new NativeMethods.POINT { X = Left, Y = Top };
+                NativeMethods.BLENDFUNCTION blend = new NativeMethods.BLENDFUNCTION
+                {
+                    BlendOp = NativeMethods.AC_SRC_OVER,
+                    BlendFlags = 0,
+                    SourceConstantAlpha = 255,
+                    AlphaFormat = NativeMethods.AC_SRC_ALPHA
+                };
+
+                NativeMethods.UpdateLayeredWindow(
+                    Handle,
+                    screenDc,
+                    ref topPos,
+                    ref size,
+                    memDc,
+                    ref pointSource,
+                    0,
+                    ref blend,
+                    NativeMethods.ULW_ALPHA);
+            }
+            finally
+            {
+                NativeMethods.SelectObject(memDc, oldDib);
+                NativeMethods.DeleteObject(hDib);
+                NativeMethods.DeleteDC(memDc);
+                NativeMethods.ReleaseDC(IntPtr.Zero, screenDc);
+            }
+        }
+
+        private void DrawCompactTwoLine(Graphics g, string upStr, string downStr, Color upColor, Color downColor, Color textColor, bool isTransparent)
+        {
+            int startX = 6;
+            int row1Y = 3;
+            int row2Y = 19;
+
+            // In transparent theme, draw soft shadow behind text for maximum legibility on any taskbar wallpaper
+            if (isTransparent)
+            {
+                using (Brush shadowBrush = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
+                {
+                    g.DrawString("▲", _fontArrow, shadowBrush, startX + 1, row1Y + 1);
+                    g.DrawString(upStr, _fontSpeed, shadowBrush, startX + 14, row1Y + 1);
+                    g.DrawString("▼", _fontArrow, shadowBrush, startX + 1, row2Y + 1);
+                    g.DrawString(downStr, _fontSpeed, shadowBrush, startX + 14, row2Y + 1);
+                }
+            }
+
+            // Upload row
+            using (Brush arrowBrush = new SolidBrush(upColor))
+            {
+                g.DrawString("▲", _fontArrow, arrowBrush, startX, row1Y);
+            }
+            using (Brush textBrush = new SolidBrush(textColor))
+            {
+                g.DrawString(upStr, _fontSpeed, textBrush, startX + 13, row1Y);
+            }
+
+            // Download row
+            using (Brush arrowBrush = new SolidBrush(downColor))
+            {
+                g.DrawString("▼", _fontArrow, arrowBrush, startX, row2Y);
+            }
+            using (Brush textBrush = new SolidBrush(textColor))
+            {
+                g.DrawString(downStr, _fontSpeed, textBrush, startX + 13, row2Y);
+            }
+        }
+
+        private void DrawSingleLine(Graphics g, string upStr, string downStr, Color upColor, Color downColor, Color textColor, bool isTransparent)
+        {
+            int y = (Height - 16) / 2;
+
+            if (isTransparent)
+            {
+                using (Brush shadowBrush = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
+                {
+                    g.DrawString("▲", _fontArrow, shadowBrush, 9, y + 1);
+                    g.DrawString(upStr, _fontSpeed, shadowBrush, 23, y + 1);
+                    g.DrawString("▼", _fontArrow, shadowBrush, 105, y + 1);
+                    g.DrawString(downStr, _fontSpeed, shadowBrush, 119, y + 1);
+                }
+            }
+
+            // Upload
+            int x = 8;
+            using (Brush arrowBrush = new SolidBrush(upColor))
+            {
+                g.DrawString("▲", _fontArrow, arrowBrush, x, y);
+            }
+            x += 14;
+            using (Brush textBrush = new SolidBrush(textColor))
+            {
+                g.DrawString(upStr, _fontSpeed, textBrush, x, y);
+            }
+
+            // Download
+            x = 104;
+            using (Brush arrowBrush = new SolidBrush(downColor))
+            {
+                g.DrawString("▼", _fontArrow, arrowBrush, x, y);
+            }
+            x += 14;
+            using (Brush textBrush = new SolidBrush(textColor))
+            {
+                g.DrawString(downStr, _fontSpeed, textBrush, x, y);
+            }
+        }
+
+        private void DrawWithMiniGraph(Graphics g, string upStr, string downStr, Color upColor, Color downColor, Color textColor, bool isTransparent)
+        {
+            DrawCompactTwoLine(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
+
+            int graphX = Width - 56;
+            int graphY = 6;
+            int graphW = 48;
+            int graphH = Height - 12;
+
+            Rectangle graphRect = new Rectangle(graphX, graphY, graphW, graphH);
+
+            if (!isTransparent)
+            {
+                using (Brush graphBg = new SolidBrush(Color.FromArgb(60, 0, 0, 0)))
+                {
+                    g.FillRectangle(graphBg, graphRect);
+                }
+                using (Pen graphBorder = new Pen(Color.FromArgb(50, 60, 60, 68), 1.0f))
+                {
+                    g.DrawRectangle(graphBorder, graphRect);
+                }
+            }
+            else
+            {
+                // In transparent mode, subtle outline without solid gray block
+                using (Pen graphBorder = new Pen(Color.FromArgb(80, 80, 80, 90), 1.0f))
+                {
+                    g.DrawRectangle(graphBorder, graphRect);
+                }
+            }
+
+            var hist = _engine.History;
+            if (hist == null || hist.Count < 2) return;
+
+            int count = Math.Min(hist.Count, 20);
+            int startIndex = hist.Count - count;
+
+            double maxSpeed = 1024; // floor 1 KB/s
+            for (int i = startIndex; i < hist.Count; i++)
+            {
+                var s = hist[i];
+                if (s.DownloadSpeed > maxSpeed) maxSpeed = s.DownloadSpeed;
+                if (s.UploadSpeed > maxSpeed) maxSpeed = s.UploadSpeed;
+            }
+
+            PointF[] downPoints = new PointF[count];
+            PointF[] upPoints = new PointF[count];
+
+            float step = (float)graphW / Math.Max(1, count - 1);
+
+            for (int i = 0; i < count; i++)
+            {
+                var s = hist[startIndex + i];
+                float px = graphX + i * step;
+                float pyDown = (float)(graphY + graphH - (s.DownloadSpeed / maxSpeed) * (graphH - 2));
+                float pyUp = (float)(graphY + graphH - (s.UploadSpeed / maxSpeed) * (graphH - 2));
+
+                downPoints[i] = new PointF(px, Math.Max(graphY + 1, Math.Min(graphY + graphH - 1, pyDown)));
+                upPoints[i] = new PointF(px, Math.Max(graphY + 1, Math.Min(graphY + graphH - 1, pyUp)));
+            }
+
+            using (Pen downPen = new Pen(Color.FromArgb(220, downColor), 1.2f))
+            {
+                g.DrawLines(downPen, downPoints);
+            }
+            using (Pen upPen = new Pen(Color.FromArgb(220, upColor), 1.2f))
+            {
+                g.DrawLines(upPen, upPoints);
+            }
+        }
+
+        private static GraphicsPath CreateRoundedRectangle(Rectangle rect, int radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            int diameter = radius * 2;
+            Rectangle arc = new Rectangle(rect.Location, new Size(diameter, diameter));
+
+            path.AddArc(arc, 180, 90);
+            arc.X = rect.Right - diameter;
+            path.AddArc(arc, 270, 90);
+            arc.Y = rect.Bottom - diameter;
+            path.AddArc(arc, 0, 90);
+            arc.X = rect.Left;
+            path.AddArc(arc, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (_fontArrow != null) _fontArrow.Dispose();
+                if (_fontSpeed != null) _fontSpeed.Dispose();
+                if (_toolTip != null) _toolTip.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+    }
+}

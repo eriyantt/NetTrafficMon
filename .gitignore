@@ -1,0 +1,17 @@
+# NetTrafficMon .gitignore
+
+# Executable & Temporary build outputs
+NetTrafficMon.exe
+*.old
+*.old.exe
+NetTrafficMon_temp.exe
+*.pdb
+
+# User settings (private local config)
+settings.json
+
+# IDE and Editor files
+.vs/
+.vscode/
+*.user
+*.suo
