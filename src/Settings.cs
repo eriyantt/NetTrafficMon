@@ -24,6 +24,7 @@ namespace NetTrafficMon
         public bool StartWithWindows { get; set; }
         public int DecimalPlaces { get; set; }
         public bool ShowUnit { get; set; }
+        public bool AutoSmallTaskbar { get; set; }
 
         public AppSettings()
         {
@@ -44,6 +45,7 @@ namespace NetTrafficMon
             StartWithWindows = false;
             DecimalPlaces = 1;
             ShowUnit = true;
+            AutoSmallTaskbar = true;
         }
 
         private static string GetConfigPath()
