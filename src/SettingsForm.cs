@@ -25,6 +25,7 @@ namespace NetTrafficMon
         private Color _currentDownloadColor;
 
         private CheckBox _chkDockTaskbar;
+        private CheckBox _chkAutoSmallTaskbar;
         private CheckBox _chkLockPosition;
         private CheckBox _chkStartup;
 
@@ -199,6 +200,17 @@ namespace NetTrafficMon
             p.SetColumnSpan(_chkDockTaskbar, 2);
             p.Controls.Add(_chkDockTaskbar, 0, r++);
 
+            // Auto Small Taskbar
+            _chkAutoSmallTaskbar = new CheckBox
+            {
+                Text = "Auto horizontal layout on small taskbar icons",
+                Checked = _settings.AutoSmallTaskbar,
+                AutoSize = true,
+                ForeColor = Color.White
+            };
+            p.SetColumnSpan(_chkAutoSmallTaskbar, 2);
+            p.Controls.Add(_chkAutoSmallTaskbar, 0, r++);
+
             // Lock Position
             _chkLockPosition = new CheckBox
             {
@@ -327,6 +339,7 @@ namespace NetTrafficMon
 
             _settings.DecimalPlaces = (int)_numDecimals.Value;
             _settings.DockToTaskbar = _chkDockTaskbar.Checked;
+            _settings.AutoSmallTaskbar = _chkAutoSmallTaskbar.Checked;
             _settings.LockPosition = _chkLockPosition.Checked;
 
             _settings.Mode = (DisplayMode)_cmbDisplayMode.SelectedIndex;
@@ -365,6 +378,7 @@ namespace NetTrafficMon
                 _cmbRefreshRate.SelectedIndex = 1;
                 _numDecimals.Value = def.DecimalPlaces;
                 _chkDockTaskbar.Checked = def.DockToTaskbar;
+                _chkAutoSmallTaskbar.Checked = def.AutoSmallTaskbar;
                 _chkLockPosition.Checked = def.LockPosition;
                 _cmbDisplayMode.SelectedIndex = (int)def.Mode;
                 _cmbTheme.SelectedIndex = (int)def.Theme;

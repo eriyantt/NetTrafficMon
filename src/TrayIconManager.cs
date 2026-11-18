@@ -124,6 +124,17 @@ namespace NetTrafficMon
             { Checked = _settings.DockToTaskbar };
             _contextMenu.Items.Add(dockItem);
 
+            // Auto Small Taskbar
+            var autoSmallItem = new ToolStripMenuItem("Auto Horizontal on Small Taskbar", null, (s, e) =>
+            {
+                _settings.AutoSmallTaskbar = !_settings.AutoSmallTaskbar;
+                _settings.Save();
+                _widget.ApplyThemeAndLayout();
+                InitializeContextMenu();
+            })
+            { Checked = _settings.AutoSmallTaskbar };
+            _contextMenu.Items.Add(autoSmallItem);
+
             // Lock Position
             var lockItem = new ToolStripMenuItem("Lock Position", null, (s, e) =>
             {
