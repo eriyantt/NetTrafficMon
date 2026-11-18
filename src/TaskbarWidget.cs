@@ -20,6 +20,9 @@ namespace NetTrafficMon
         private Font _fontArrow;
         private Font _fontSpeed;
 
+        private Rectangle _lastTbRect;
+        private int _checkTbCounter = 0;
+
         public TaskbarWidget(TrafficEngine engine, AppSettings settings)
         {
             _engine = engine;
@@ -98,26 +101,66 @@ namespace NetTrafficMon
             RenderLayeredWindow();
         }
 
+        public static bool IsSmallTaskbar(Rectangle tbRect)
+        {
+            if (tbRect.Width > tbRect.Height)
+            {
+                // Horizontal taskbar: small icon mode is usually 30px or 32px
+                return tbRect.Height > 0 && tbRect.Height <= 36;
+            }
+            else
+            {
+                // Vertical taskbar
+                return tbRect.Width > 0 && tbRect.Width <= 45;
+            }
+        }
+
         public void ApplySizeAndPosition()
         {
-            int w = 115;
+            Rectangle tbRect = GetTaskbarRectangle();
+            _lastTbRect = tbRect;
+            bool isSmall = _settings.AutoSmallTaskbar && IsSmallTaskbar(tbRect);
+
+            int w = 110;
             int h = 38;
 
-            switch (_settings.Mode)
+            if (isSmall)
             {
-                case DisplayMode.SingleLine:
-                    w = 210;
-                    h = 30;
-                    break;
-                case DisplayMode.WithMiniGraph:
-                    w = 175;
-                    h = 38;
-                    break;
-                case DisplayMode.CompactTwoLine:
-                default:
-                    w = 115;
-                    h = 38;
-                    break;
+                // Small taskbar mode (e.g. 30px - 34px)
+                // Automatically use horizontal layout so text is never vertically squished!
+                h = Math.Min(26, Math.Max(22, tbRect.Height - 4));
+
+                if (_settings.Mode == DisplayMode.WithMiniGraph)
+                {
+                    // Horizontal with mini graph
+                    w = 236;
+                }
+                else
+                {
+                    // Single line horizontal (CompactTwoLine also converts to horizontal on small taskbar)
+                    w = 182;
+                }
+            }
+            else
+            {
+                // Normal taskbar mode (40px or 48px)
+                h = Math.Min(38, Math.Max(32, tbRect.Height - 6));
+
+                switch (_settings.Mode)
+                {
+                    case DisplayMode.SingleLine:
+                        w = 185;
+                        h = Math.Min(30, tbRect.Height - 8);
+                        break;
+                    case DisplayMode.WithMiniGraph:
+                        // Graph is closer to numbers (starts at x=84) and wider (65px wide)
+                        w = 155;
+                        break;
+                    case DisplayMode.CompactTwoLine:
+                    default:
+                        w = 108;
+                        break;
+                }
             }
 
             Size = new Size(w, h);
@@ -135,20 +178,23 @@ namespace NetTrafficMon
         public void DockToTaskbarPosition()
         {
             Rectangle tbRect = GetTaskbarRectangle();
-
             int x, y;
+
             if (tbRect.Width > tbRect.Height)
             {
                 // Horizontal taskbar (Bottom or Top)
                 y = tbRect.Top + (tbRect.Height - Height) / 2;
-                x = tbRect.Right - Width - 240;
+
+                // Dynamically find where the tray area begins so we NEVER overlap the chevron or tray icons!
+                int trayLeft = GetTrayLeftEdge(tbRect);
+                x = trayLeft - Width - 10;
                 if (x < tbRect.Left + 20) x = tbRect.Left + 20;
             }
             else
             {
                 // Vertical taskbar (Left or Right)
                 x = tbRect.Left + (tbRect.Width - Width) / 2;
-                y = tbRect.Bottom - Height - 200;
+                y = tbRect.Bottom - Height - 280;
                 if (y < tbRect.Top + 20) y = tbRect.Top + 20;
             }
 
@@ -159,6 +205,34 @@ namespace NetTrafficMon
             _settings.Save();
 
             RenderLayeredWindow();
+        }
+
+        public static int GetTrayLeftEdge(Rectangle tbRect)
+        {
+            // Default safe distance: in typical Windows 10/11 taskbars with clock,
+            // action center, battery, network, audio, and chevron overflow,
+            // the notification area width is approximately 310 - 340px.
+            int fallbackLeft = tbRect.Right - 330;
+
+            try
+            {
+                IntPtr trayHwnd = NativeMethods.FindWindow("Shell_TrayWnd", null);
+                if (trayHwnd != IntPtr.Zero)
+                {
+                    IntPtr notifyHwnd = NativeMethods.FindWindowEx(trayHwnd, IntPtr.Zero, "TrayNotifyWnd", null);
+                    if (notifyHwnd != IntPtr.Zero)
+                    {
+                        NativeMethods.RECT nr;
+                        if (NativeMethods.GetWindowRect(notifyHwnd, out nr) && nr.Left > tbRect.Left && nr.Left < tbRect.Right)
+                        {
+                            return nr.Left;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return fallbackLeft;
         }
 
         public static Rectangle GetTaskbarRectangle()
@@ -182,6 +256,18 @@ namespace NetTrafficMon
         private void OnTrafficUpdated(TrafficSample sample)
         {
             if (IsDisposed || !IsHandleCreated) return;
+
+            // Check if taskbar dimensions changed (e.g. user toggled small taskbar icons)
+            _checkTbCounter++;
+            if (_checkTbCounter >= 2)
+            {
+                _checkTbCounter = 0;
+                Rectangle currentTb = GetTaskbarRectangle();
+                if (currentTb != _lastTbRect)
+                {
+                    ApplySizeAndPosition();
+                }
+            }
 
             string upText = FormatHelper.FormatSpeed(_engine.CurrentUploadSpeed, _settings.Unit, _settings.DecimalPlaces);
             string downText = FormatHelper.FormatSpeed(_engine.CurrentDownloadSpeed, _settings.Unit, _settings.DecimalPlaces);
@@ -282,8 +368,7 @@ namespace NetTrafficMon
                     g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
                     g.Clear(Color.Transparent);
 
-                    // Always fill the whole rectangle with alpha=1 so mouse events/dragging work everywhere,
-                    // while remaining 100% visually invisible!
+                    // Invisible hit-test background so dragging and clicks work everywhere
                     using (Brush hitTestBrush = new SolidBrush(Color.FromArgb(1, 0, 0, 0)))
                     {
                         g.FillRectangle(hitTestBrush, 0, 0, Width, Height);
@@ -297,12 +382,11 @@ namespace NetTrafficMon
                     // Theme background rendering
                     if (_settings.Theme == AppTheme.Transparent)
                     {
-                        // 100% Transparent theme: no solid fill or border box!
-                        // The Windows taskbar shows right through.
+                        // 100% Transparent theme: taskbar shows directly through
                     }
                     else if (_settings.Theme == AppTheme.Light)
                     {
-                        // Light theme: crisp light pill with clean subtle border
+                        // Light theme: crisp light pill
                         Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
                         using (GraphicsPath path = CreateRoundedRectangle(rect, 5))
                         {
@@ -319,7 +403,7 @@ namespace NetTrafficMon
                     }
                     else
                     {
-                        // Dark theme: sleek dark pill, ZERO white lines or white corners!
+                        // Dark theme: sleek dark pill, ZERO white lines or white corners
                         Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
                         Color userBg = FormatHelper.ColorFromHex(_settings.BackgroundColor, Color.FromArgb(26, 26, 30));
                         using (GraphicsPath path = CreateRoundedRectangle(rect, 5))
@@ -328,7 +412,6 @@ namespace NetTrafficMon
                             {
                                 g.FillPath(bgBrush, path);
                             }
-                            // Clean subtle dark border (not white!)
                             using (Pen borderPen = new Pen(Color.FromArgb(Math.Min(255, alphaByte + 20), 45, 45, 52), 1.0f))
                             {
                                 g.DrawPath(borderPen, path);
@@ -340,17 +423,36 @@ namespace NetTrafficMon
                     string downStr = FormatHelper.FormatSpeed(_engine.CurrentDownloadSpeed, _settings.Unit, _settings.DecimalPlaces);
                     bool isTransparent = (_settings.Theme == AppTheme.Transparent);
 
-                    if (_settings.Mode == DisplayMode.SingleLine)
+                    Rectangle tbRect = GetTaskbarRectangle();
+                    bool isSmall = _settings.AutoSmallTaskbar && IsSmallTaskbar(tbRect);
+
+                    if (isSmall)
                     {
-                        DrawSingleLine(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
-                    }
-                    else if (_settings.Mode == DisplayMode.WithMiniGraph)
-                    {
-                        DrawWithMiniGraph(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
+                        // Small taskbar: render horizontally
+                        if (_settings.Mode == DisplayMode.WithMiniGraph)
+                        {
+                            DrawHorizontalWithMiniGraph(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
+                        }
+                        else
+                        {
+                            DrawSingleLine(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
+                        }
                     }
                     else
                     {
-                        DrawCompactTwoLine(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
+                        // Normal taskbar
+                        if (_settings.Mode == DisplayMode.SingleLine)
+                        {
+                            DrawSingleLine(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
+                        }
+                        else if (_settings.Mode == DisplayMode.WithMiniGraph)
+                        {
+                            DrawWithMiniGraph(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
+                        }
+                        else
+                        {
+                            DrawCompactTwoLine(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
+                        }
                     }
                 }
 
@@ -391,7 +493,6 @@ namespace NetTrafficMon
             int row1Y = 3;
             int row2Y = 19;
 
-            // In transparent theme, draw soft shadow behind text for maximum legibility on any taskbar wallpaper
             if (isTransparent)
             {
                 using (Brush shadowBrush = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
@@ -432,15 +533,15 @@ namespace NetTrafficMon
             {
                 using (Brush shadowBrush = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
                 {
-                    g.DrawString("▲", _fontArrow, shadowBrush, 9, y + 1);
-                    g.DrawString(upStr, _fontSpeed, shadowBrush, 23, y + 1);
-                    g.DrawString("▼", _fontArrow, shadowBrush, 105, y + 1);
-                    g.DrawString(downStr, _fontSpeed, shadowBrush, 119, y + 1);
+                    g.DrawString("▲", _fontArrow, shadowBrush, 7, y + 1);
+                    g.DrawString(upStr, _fontSpeed, shadowBrush, 21, y + 1);
+                    g.DrawString("▼", _fontArrow, shadowBrush, 97, y + 1);
+                    g.DrawString(downStr, _fontSpeed, shadowBrush, 111, y + 1);
                 }
             }
 
             // Upload
-            int x = 8;
+            int x = 6;
             using (Brush arrowBrush = new SolidBrush(upColor))
             {
                 g.DrawString("▲", _fontArrow, arrowBrush, x, y);
@@ -452,7 +553,7 @@ namespace NetTrafficMon
             }
 
             // Download
-            x = 104;
+            x = 96;
             using (Brush arrowBrush = new SolidBrush(downColor))
             {
                 g.DrawString("▼", _fontArrow, arrowBrush, x, y);
@@ -466,13 +567,68 @@ namespace NetTrafficMon
 
         private void DrawWithMiniGraph(Graphics g, string upStr, string downStr, Color upColor, Color downColor, Color textColor, bool isTransparent)
         {
+            // Draw 2 lines of speed numbers
             DrawCompactTwoLine(g, upStr, downStr, upColor, downColor, textColor, isTransparent);
 
-            int graphX = Width - 56;
-            int graphY = 6;
-            int graphW = 48;
-            int graphH = Height - 12;
+            // Position graph close ("mepet") right after speed numbers (at x = 84 instead of 119!)
+            int graphX = 84;
+            int graphY = 5;
+            int graphW = Math.Max(40, Width - graphX - 6); // 65px wide!
+            int graphH = Height - 10;
 
+            DrawGraphCanvas(g, graphX, graphY, graphW, graphH, upColor, downColor, isTransparent);
+        }
+
+        private void DrawHorizontalWithMiniGraph(Graphics g, string upStr, string downStr, Color upColor, Color downColor, Color textColor, bool isTransparent)
+        {
+            int y = (Height - 16) / 2;
+
+            if (isTransparent)
+            {
+                using (Brush shadowBrush = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
+                {
+                    g.DrawString("▲", _fontArrow, shadowBrush, 7, y + 1);
+                    g.DrawString(upStr, _fontSpeed, shadowBrush, 21, y + 1);
+                    g.DrawString("▼", _fontArrow, shadowBrush, 93, y + 1);
+                    g.DrawString(downStr, _fontSpeed, shadowBrush, 107, y + 1);
+                }
+            }
+
+            // Upload
+            int x = 6;
+            using (Brush arrowBrush = new SolidBrush(upColor))
+            {
+                g.DrawString("▲", _fontArrow, arrowBrush, x, y);
+            }
+            x += 14;
+            using (Brush textBrush = new SolidBrush(textColor))
+            {
+                g.DrawString(upStr, _fontSpeed, textBrush, x, y);
+            }
+
+            // Download
+            x = 92;
+            using (Brush arrowBrush = new SolidBrush(downColor))
+            {
+                g.DrawString("▼", _fontArrow, arrowBrush, x, y);
+            }
+            x += 14;
+            using (Brush textBrush = new SolidBrush(textColor))
+            {
+                g.DrawString(downStr, _fontSpeed, textBrush, x, y);
+            }
+
+            // Mini graph next to download
+            int graphX = 172;
+            int graphY = 4;
+            int graphW = Math.Max(40, Width - graphX - 6);
+            int graphH = Height - 8;
+
+            DrawGraphCanvas(g, graphX, graphY, graphW, graphH, upColor, downColor, isTransparent);
+        }
+
+        private void DrawGraphCanvas(Graphics g, int graphX, int graphY, int graphW, int graphH, Color upColor, Color downColor, bool isTransparent)
+        {
             Rectangle graphRect = new Rectangle(graphX, graphY, graphW, graphH);
 
             if (!isTransparent)
@@ -489,7 +645,7 @@ namespace NetTrafficMon
             else
             {
                 // In transparent mode, subtle outline without solid gray block
-                using (Pen graphBorder = new Pen(Color.FromArgb(80, 80, 80, 90), 1.0f))
+                using (Pen graphBorder = new Pen(Color.FromArgb(70, 75, 75, 85), 1.0f))
                 {
                     g.DrawRectangle(graphBorder, graphRect);
                 }
@@ -498,7 +654,7 @@ namespace NetTrafficMon
             var hist = _engine.History;
             if (hist == null || hist.Count < 2) return;
 
-            int count = Math.Min(hist.Count, 20);
+            int count = Math.Min(hist.Count, 24);
             int startIndex = hist.Count - count;
 
             double maxSpeed = 1024; // floor 1 KB/s
